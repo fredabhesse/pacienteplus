@@ -231,6 +231,18 @@
   height: calc(100vh - 98px);
   margin: 0 auto;
   padding: 26px 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.page-frame::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.page-frame.page-conversas {
   overflow: hidden;
 }
 
