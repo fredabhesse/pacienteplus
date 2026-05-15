@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Activity,
   Award,
@@ -68,8 +68,14 @@ import {
   type PatientStatus,
   type PromotionHistoryItem,
 } from './data'
+import {
+  LocalStorageDataRepository,
+  demoStateToSnapshot,
+  snapshotToDemoState,
+  type AuditInput,
+} from './dataStore'
 
-const STORAGE_KEY = 'paciente-plus-demo-state'
+type PersistDemoState = (updater: React.SetStateAction<DemoState>, audit?: AuditInput) => void
 
 const navItems: NavItem[] = [
   { key: 'dashboard', label: 'Visão Operacional', icon: Grid2X2 },
@@ -115,12 +121,7 @@ const pageTitles: Record<PageKey, { title: string; subtitle: string }> = {
 function App() {
   const [activePage, setActivePage] = useState<PageKey>('dashboard')
   const [conversationFocusPatientId, setConversationFocusPatientId] = useState<string | null>(null)
-  const [demoState, setDemoState] = usePersistentDemoState()
-
-  function resetDemo() {
-    window.localStorage.removeItem(STORAGE_KEY)
-    setDemoState(structuredClone(defaultDemoState))
-  }
+  const [demoState, persistDemoState, resetDemo] = usePersistentDemoState()
 
   function openConversationForPatient(patientId: string) {
     setConversationFocusPatientId(patientId)
@@ -132,11 +133,11 @@ function App() {
       <Sidebar activePage={activePage} onNavigate={setActivePage} />
       <main className="main-panel">
         <Topbar />
-        <div className="page-frame">
+        <div className={`page-frame page-${activePage}`}>
           <PageContent
             activePage={activePage}
             demoState={demoState}
-            setDemoState={setDemoState}
+            setDemoState={persistDemoState}
             resetDemo={resetDemo}
             conversationFocusPatientId={conversationFocusPatientId}
             onOpenConversation={openConversationForPatient}
@@ -147,36 +148,34 @@ function App() {
   )
 }
 
-function usePersistentDemoState(): [DemoState, React.Dispatch<React.SetStateAction<DemoState>>] {
-  const [state, setState] = useState<DemoState>(() => {
-    try {
-      const stored = window.localStorage.getItem(STORAGE_KEY)
-      if (!stored) return structuredClone(defaultDemoState)
-      return normalizeDemoState(JSON.parse(stored))
-    } catch {
-      return structuredClone(defaultDemoState)
-    }
-  })
+function usePersistentDemoState(): [DemoState, PersistDemoState, () => void] {
+  const repository = useMemo(() => new LocalStorageDataRepository(), [])
+  const [snapshot, setSnapshot] = useState(() => repository.loadSnapshot())
+  const demoState = useMemo(() => snapshotToDemoState(snapshot), [snapshot])
 
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  }, [state])
-
-  return [state, setState]
-}
-
-function normalizeDemoState(value: Partial<DemoState>): DemoState {
-  return {
-    patients: value.patients?.length ? value.patients : defaultDemoState.patients,
-    conversations: value.conversations?.length ? value.conversations : defaultDemoState.conversations,
-    conversationMessages: value.conversationMessages ?? {},
-    humanMode: value.humanMode ?? {},
-    promotionHistory: value.promotionHistory ?? {},
-    appointments: value.appointments?.length ? value.appointments : defaultDemoState.appointments,
-    campaigns: value.campaigns?.length ? value.campaigns : defaultDemoState.campaigns,
-    benefits: value.benefits?.length ? value.benefits : defaultDemoState.benefits,
-    programMetrics: value.programMetrics ?? defaultDemoState.programMetrics,
+  function persistDemoState(updater: React.SetStateAction<DemoState>, audit?: AuditInput) {
+    setSnapshot((currentSnapshot) => {
+      const currentState = snapshotToDemoState(currentSnapshot)
+      const nextState = typeof updater === 'function' ? updater(currentState) : updater
+      const nextSnapshot = demoStateToSnapshot(
+        nextState,
+        audit ?? {
+          entity: 'programMetrics',
+          entityId: 'data-store',
+          action: 'update',
+          metadata: { source: 'legacy-mutation' },
+        },
+      )
+      repository.saveSnapshot(nextSnapshot)
+      return nextSnapshot
+    })
   }
+
+  function resetDemo() {
+    setSnapshot(repository.resetSnapshot())
+  }
+
+  return [demoState, persistDemoState, resetDemo]
 }
 
 function Sidebar({
@@ -256,7 +255,7 @@ function PageContent({
 }: {
   activePage: PageKey
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
   resetDemo: () => void
   conversationFocusPatientId: string | null
   onOpenConversation: (patientId: string) => void
@@ -588,7 +587,7 @@ function ConversationsPage({
   focusPatientId,
 }: {
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
   focusPatientId: string | null
 }) {
   const [filter, setFilter] = useState<'Todos' | LeadTemperature>('Todos')
@@ -610,7 +609,7 @@ function ConversationsPage({
     demoState.patients.find((patient) => patient.id === selectedConversation?.patientId) ?? demoState.patients[0]
   const messages = selectedConversation
     ? [
-        ...buildConversationMessages(selectedPatient.name, selectedPatient.interest),
+        ...buildConversationMessages(selectedPatient.name, selectedPatient.interest, selectedConversation.id),
         ...(demoState.conversationMessages[selectedConversation.id] ?? []),
       ]
     : []
@@ -621,50 +620,71 @@ function ConversationsPage({
   function handleSend() {
     if (!draft.trim() || !selectedConversation) return
     const text = draft.trim()
+    const createdAt = new Date().toISOString()
     const message: ChatMessage = {
       id: createId('msg'),
+      conversationId: selectedConversation.id,
       author: isHuman ? 'agent' : 'patient',
       text,
       time: 'Agora',
+      createdAt,
     }
     const botReply: ChatMessage | null = isHuman
       ? null
       : {
           id: createId('bot'),
+          conversationId: selectedConversation.id,
           author: 'bot',
           text: buildBotReply(text, selectedPatient),
           time: 'Agora',
+          createdAt,
         }
     const nextMessages = botReply ? [message, botReply] : [message]
-    setDemoState((current) => ({
-      ...current,
-      conversationMessages: {
-        ...current.conversationMessages,
-        [selectedConversation.id]: [...(current.conversationMessages[selectedConversation.id] ?? []), ...nextMessages],
+    setDemoState(
+      (current) => ({
+        ...current,
+        conversationMessages: {
+          ...current.conversationMessages,
+          [selectedConversation.id]: [...(current.conversationMessages[selectedConversation.id] ?? []), ...nextMessages],
+        },
+        conversations: current.conversations.map((conversation) =>
+          conversation.id === selectedConversation.id
+            ? {
+                ...conversation,
+                preview: (botReply?.text ?? message.text).slice(0, 48),
+                unread: isHuman ? 0 : conversation.unread + 1,
+                time: 'Agora',
+              }
+            : conversation,
+        ),
+      }),
+      {
+        entity: 'message',
+        entityId: message.id,
+        action: 'send',
+        metadata: { conversationId: selectedConversation.id, author: message.author },
       },
-      conversations: current.conversations.map((conversation) =>
-        conversation.id === selectedConversation.id
-          ? {
-              ...conversation,
-              preview: (botReply?.text ?? message.text).slice(0, 48),
-              unread: isHuman ? 0 : conversation.unread + 1,
-              time: 'Agora',
-            }
-          : conversation,
-      ),
-    }))
+    )
     setDraft('')
   }
 
   function toggleHumanMode() {
     if (!selectedConversation) return
-    setDemoState((current) => ({
-      ...current,
-      humanMode: {
-        ...current.humanMode,
-        [selectedConversation.id]: !current.humanMode[selectedConversation.id],
+    setDemoState(
+      (current) => ({
+        ...current,
+        humanMode: {
+          ...current.humanMode,
+          [selectedConversation.id]: !current.humanMode[selectedConversation.id],
+        },
+      }),
+      {
+        entity: 'conversation',
+        entityId: selectedConversation.id,
+        action: 'toggle',
+        metadata: { field: 'humanMode' },
       },
-    }))
+    )
   }
 
   return (
@@ -859,7 +879,7 @@ function ConversationsPage({
       {profileOpen && selectedPatient ? (
         <PatientDetailsModal
           patient={selectedPatient}
-          appointments={demoState.appointments.filter((appointment) => appointment.patient === selectedPatient.name)}
+          appointments={demoState.appointments.filter((appointment) => appointment.patientId === selectedPatient.id)}
           conversation={selectedConversation}
           messages={selectedConversation ? demoState.conversationMessages[selectedConversation.id] ?? [] : []}
           promotionHistory={demoState.promotionHistory[selectedPatient.id] ?? []}
@@ -875,7 +895,7 @@ function AppointmentsPage({
   setDemoState,
 }: {
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
 }) {
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Appointment | null>(null)
@@ -901,8 +921,10 @@ function AppointmentsPage({
 
   function saveAppointment() {
     if (!form.patient.trim() || !form.specialty.trim() || !form.time.trim()) return
+    const selectedPatient = demoState.patients.find((patient) => patient.name === form.patient.trim())
     const next: Appointment = {
       id: editing?.id ?? createId('appt'),
+      patientId: selectedPatient?.id ?? editing?.patientId ?? demoState.patients[0]?.id ?? 'manual-patient',
       day: clampNumber(Number(form.day), 1, 35),
       time: form.time,
       specialty: form.specialty.trim(),
@@ -912,21 +934,37 @@ function AppointmentsPage({
       status: form.status,
       mode: form.mode.trim() || 'Consulta',
     }
-    setDemoState((current) => ({
-      ...current,
-      appointments: editing
-        ? current.appointments.map((item) => (item.id === editing.id ? next : item))
-        : [...current.appointments, next],
-    }))
+    setDemoState(
+      (current) => ({
+        ...current,
+        appointments: editing
+          ? current.appointments.map((item) => (item.id === editing.id ? next : item))
+          : [...current.appointments, next],
+      }),
+      {
+        entity: 'appointment',
+        entityId: next.id,
+        action: editing ? 'update' : 'create',
+        metadata: { patientId: next.patientId, specialty: next.specialty },
+      },
+    )
     setModalOpen(false)
   }
 
   function deleteAppointment() {
     if (!editing) return
-    setDemoState((current) => ({
-      ...current,
-      appointments: current.appointments.filter((item) => item.id !== editing.id),
-    }))
+    setDemoState(
+      (current) => ({
+        ...current,
+        appointments: current.appointments.filter((item) => item.id !== editing.id),
+      }),
+      {
+        entity: 'appointment',
+        entityId: editing.id,
+        action: 'delete',
+        metadata: { patientId: editing.patientId },
+      },
+    )
     setModalOpen(false)
   }
 
@@ -1098,7 +1136,7 @@ function PatientsPage({
   onOpenConversation,
 }: {
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
   onOpenConversation: (patientId: string) => void
 }) {
   const [query, setQuery] = useState('')
@@ -1146,30 +1184,75 @@ function PatientsPage({
       temperature: scoreToTemperature(Number(form.score)),
       channel: form.channel,
       interest: form.interest.trim() || 'Consulta Geral',
+      consent: editing?.consent ?? {
+        marketing: false,
+        communication: true,
+        updatedAt: new Date().toISOString(),
+      },
     }
-    setDemoState((current) => ({
-      ...current,
-      patients: editing ? current.patients.map((item) => (item.id === editing.id ? patient : item)) : [...current.patients, patient],
-    }))
+    setDemoState(
+      (current) => ({
+        ...current,
+        patients: editing ? current.patients.map((item) => (item.id === editing.id ? patient : item)) : [...current.patients, patient],
+      }),
+      {
+        entity: 'patient',
+        entityId: patient.id,
+        action: editing ? 'update' : 'create',
+        metadata: { status: patient.status, consentCommunication: patient.consent.communication, consentMarketing: patient.consent.marketing },
+      },
+    )
     setModalOpen(false)
   }
 
   function deletePatient() {
     if (!editing) return
-    setDemoState((current) => ({
-      ...current,
-      patients: current.patients.filter((item) => item.id !== editing.id),
-      conversations: current.conversations.filter((conversation) => conversation.patientId !== editing.id),
-    }))
+    setDemoState(
+      (current) => {
+        const deletedConversationIds = current.conversations
+          .filter((conversation) => conversation.patientId === editing.id)
+          .map((conversation) => conversation.id)
+        const nextConversationMessages = { ...current.conversationMessages }
+        const nextHumanMode = { ...current.humanMode }
+        deletedConversationIds.forEach((conversationId) => {
+          delete nextConversationMessages[conversationId]
+          delete nextHumanMode[conversationId]
+        })
+
+        return {
+          ...current,
+          patients: current.patients.filter((item) => item.id !== editing.id),
+          conversations: current.conversations.filter((conversation) => conversation.patientId !== editing.id),
+          conversationMessages: nextConversationMessages,
+          humanMode: nextHumanMode,
+          promotionHistory: Object.fromEntries(Object.entries(current.promotionHistory).filter(([patientId]) => patientId !== editing.id)),
+          appointments: current.appointments.filter((appointment) => appointment.patientId !== editing.id),
+        }
+      },
+      {
+        entity: 'patient',
+        entityId: editing.id,
+        action: 'delete',
+        metadata: { cascade: 'conversations,appointments,promotionHistory' },
+      },
+    )
     setModalOpen(false)
   }
 
   function togglePatientStatus(patient: Patient) {
     const nextStatus: PatientStatus = patient.status === 'Ativo' ? 'Inativo' : 'Ativo'
-    setDemoState((current) => ({
-      ...current,
-      patients: current.patients.map((item) => (item.id === patient.id ? { ...item, status: nextStatus } : item)),
-    }))
+    setDemoState(
+      (current) => ({
+        ...current,
+        patients: current.patients.map((item) => (item.id === patient.id ? { ...item, status: nextStatus } : item)),
+      }),
+      {
+        entity: 'patient',
+        entityId: patient.id,
+        action: 'toggle',
+        metadata: { field: 'status', nextStatus },
+      },
+    )
     setActionsPatient((current) => (current ? { ...current, status: nextStatus } : current))
     setActionNotice(`${patient.name} agora está ${nextStatus.toLowerCase()}.`)
   }
@@ -1177,6 +1260,8 @@ function PatientsPage({
   function sendPromotion(patient: Patient, channel: 'email' | 'mensagem', benefit: Benefit) {
     const historyItem: PromotionHistoryItem = {
       id: createId('promo-history'),
+      patientId: patient.id,
+      benefitId: benefit.id,
       date: new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
       promotion: benefit.name,
       channel: channel === 'email' ? 'E-mail' : 'Mensagem',
@@ -1187,33 +1272,51 @@ function PatientsPage({
       if (conversation) {
         const message: ChatMessage = {
           id: createId('promo'),
+          conversationId: conversation.id,
           author: 'agent',
           text: `Olá ${patient.name.split(' ')[0]}! Separei a promoção "${benefit.name}" do Paciente+ para apoiar seu interesse em ${patient.interest.toLowerCase()}. Quer que eu te envie os detalhes?`,
           time: 'Agora',
+          createdAt: new Date().toISOString(),
         }
-        setDemoState((current) => ({
+        setDemoState(
+          (current) => ({
+            ...current,
+            promotionHistory: {
+              ...current.promotionHistory,
+              [patient.id]: [historyItem, ...(current.promotionHistory[patient.id] ?? [])],
+            },
+            conversationMessages: {
+              ...current.conversationMessages,
+              [conversation.id]: [...(current.conversationMessages[conversation.id] ?? []), message],
+            },
+            conversations: current.conversations.map((item) =>
+              item.id === conversation.id ? { ...item, preview: message.text.slice(0, 48), time: 'Agora' } : item,
+            ),
+          }),
+          {
+            entity: 'promotion',
+            entityId: historyItem.id,
+            action: 'send',
+            metadata: { patientId: patient.id, benefitId: benefit.id, channel },
+          },
+        )
+      }
+    } else {
+      setDemoState(
+        (current) => ({
           ...current,
           promotionHistory: {
             ...current.promotionHistory,
             [patient.id]: [historyItem, ...(current.promotionHistory[patient.id] ?? [])],
           },
-          conversationMessages: {
-            ...current.conversationMessages,
-            [conversation.id]: [...(current.conversationMessages[conversation.id] ?? []), message],
-          },
-          conversations: current.conversations.map((item) =>
-            item.id === conversation.id ? { ...item, preview: message.text.slice(0, 48), time: 'Agora' } : item,
-          ),
-        }))
-      }
-    } else {
-      setDemoState((current) => ({
-        ...current,
-        promotionHistory: {
-          ...current.promotionHistory,
-          [patient.id]: [historyItem, ...(current.promotionHistory[patient.id] ?? [])],
+        }),
+        {
+          entity: 'promotion',
+          entityId: historyItem.id,
+          action: 'send',
+          metadata: { patientId: patient.id, benefitId: benefit.id, channel },
         },
-      }))
+      )
     }
     setActionNotice(
       channel === 'email'
@@ -1384,7 +1487,7 @@ function PatientsPage({
       {detailsPatient ? (
         <PatientDetailsModal
           patient={detailsPatient}
-          appointments={demoState.appointments.filter((appointment) => appointment.patient === detailsPatient.name)}
+          appointments={demoState.appointments.filter((appointment) => appointment.patientId === detailsPatient.id)}
           conversation={demoState.conversations.find((conversation) => conversation.patientId === detailsPatient.id)}
           messages={(() => {
             const conversation = demoState.conversations.find((item) => item.patientId === detailsPatient.id)
@@ -1493,7 +1596,7 @@ function PatientDetailsModal({
   promotionHistory?: PromotionHistoryItem[]
   onClose: () => void
 }) {
-  const interactionMessages = [...buildConversationMessages(patient.name, patient.interest), ...messages].slice(-5)
+  const interactionMessages = [...buildConversationMessages(patient.name, patient.interest, conversation?.id), ...messages].slice(-5)
 
   return (
     <Modal title={`Interações de ${patient.name}`} onClose={onClose} wide>
@@ -1597,7 +1700,7 @@ function CampaignsPage({
   setDemoState,
 }: {
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
 }) {
   const [activeTab, setActiveTab] = useState<CampaignStage>('Ativas')
   const [modalOpen, setModalOpen] = useState(false)
@@ -1632,12 +1735,20 @@ function CampaignsPage({
       status: form.status.trim() || 'Em andamento',
       stage: form.stage,
     }
-    setDemoState((current) => ({
-      ...current,
-      campaigns: editing
-        ? current.campaigns.map((item) => (item.id === editing.id ? campaign : item))
-        : [...current.campaigns, campaign],
-    }))
+    setDemoState(
+      (current) => ({
+        ...current,
+        campaigns: editing
+          ? current.campaigns.map((item) => (item.id === editing.id ? campaign : item))
+          : [...current.campaigns, campaign],
+      }),
+      {
+        entity: 'campaign',
+        entityId: campaign.id,
+        action: editing ? 'update' : 'create',
+        metadata: { stage: campaign.stage, channel: campaign.channel },
+      },
+    )
     setActiveTab(campaign.stage)
     setModalOpen(false)
   }
@@ -1777,7 +1888,7 @@ function ProgramPage({
   setDemoState,
 }: {
   demoState: DemoState
-  setDemoState: React.Dispatch<React.SetStateAction<DemoState>>
+  setDemoState: PersistDemoState
 }) {
   const [benefitModal, setBenefitModal] = useState<Benefit | null>(null)
   const [selectedLevel, setSelectedLevel] = useState<LoyaltyLevel | null>(null)
@@ -1810,7 +1921,12 @@ function ProgramPage({
             }
           : benefit,
       ),
-    }))
+    }), {
+      entity: 'benefit',
+      entityId: benefitModal.id,
+      action: 'update',
+      metadata: { score: benefitForm.score.trim() || '8.0' },
+    })
     setBenefitModal(null)
   }
 
@@ -1822,7 +1938,12 @@ function ProgramPage({
         retention: clampNumber(Number(metricsForm.retention), 0, 100),
         redemptions: Math.max(0, Number(metricsForm.redemptions) || 0),
       },
-    }))
+    }), {
+      entity: 'programMetrics',
+      entityId: 'program-metrics',
+      action: 'update',
+      metadata: { nps: metricsForm.nps, retention: metricsForm.retention },
+    })
     setMetricsOpen(false)
   }
 
@@ -2010,6 +2131,7 @@ function SettingsPage({ demoState, resetDemo }: { demoState: DemoState; resetDem
           <span>{demoState.appointments.length} agendamentos</span>
           <span>{demoState.campaigns.length} campanhas</span>
           <span>{demoState.benefits.length} benefícios</span>
+          <span>{demoState.auditEvents.length} eventos auditados</span>
         </div>
         <Button variant="secondary" danger onClick={resetDemo}>
           Resetar demo
@@ -2065,38 +2187,49 @@ function TemperatureBadge({ temperature, score }: { temperature: LeadTemperature
   )
 }
 
-function buildConversationMessages(patientName: string, interest: string): ChatMessage[] {
+function buildConversationMessages(patientName: string, interest: string, conversationId = 'seed-conversation'): ChatMessage[] {
   const firstName = patientName.split(' ')[0]
+  const createdAt = '2026-05-14T09:00:00.000Z'
   return [
     {
       id: 'm1',
+      conversationId,
       author: 'bot',
       text: `Olá ${firstName}! Sou a assistente virtual do MaterDei. Como posso te ajudar hoje?`,
       time: '14:20',
+      createdAt,
     },
     {
       id: 'm2',
+      conversationId,
       author: 'patient',
       text: `Oi! Preciso agendar ${interest.toLowerCase()}.`,
       time: '14:22',
+      createdAt,
     },
     {
       id: 'm3',
+      conversationId,
       author: 'bot',
       text: `Claro! Encontrei estes horários disponíveis para ${interest} nos próximos dias:\n\n- Quinta, 24/04 - 14h00\n- Sexta, 25/04 - 09h30\n- Segunda, 28/04 - 16h00\n\nQual prefere?`,
       time: '14:23',
+      createdAt,
     },
     {
       id: 'm4',
+      conversationId,
       author: 'patient',
       text: 'Quinta às 14h fica ótimo!',
       time: '14:30',
+      createdAt,
     },
     {
       id: 'm5',
+      conversationId,
       author: 'bot',
       text: 'Perfeito! Pode confirmar para quinta às 14h? Vou precisar do número da sua carteirinha para finalizar.',
       time: '14:32',
+      createdAt,
     },
   ]
 }

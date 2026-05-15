@@ -15,6 +15,8 @@ export type LoyaltyLevel = 'Ouro' | 'Prata' | 'Bronze'
 export type ContactChannel = 'WhatsApp' | 'Site' | 'Telefone'
 export type CampaignStage = 'Ativas' | 'Agendadas' | 'Finalizadas'
 export type AppointmentStatus = 'Conf.' | 'Esp.' | 'Online'
+export type AuditEntity = 'patient' | 'conversation' | 'message' | 'appointment' | 'campaign' | 'benefit' | 'programMetrics' | 'promotion'
+export type AuditAction = 'create' | 'update' | 'delete' | 'send' | 'toggle' | 'reset' | 'migrate'
 
 export type NavItem = {
   key: PageKey
@@ -36,6 +38,11 @@ export type Patient = {
   temperature: LeadTemperature
   channel: ContactChannel
   interest: string
+  consent: {
+    marketing: boolean
+    communication: boolean
+    updatedAt: string
+  }
 }
 
 export type Conversation = {
@@ -53,13 +60,16 @@ export type Conversation = {
 
 export type ChatMessage = {
   id: string
+  conversationId: string
   author: 'bot' | 'patient' | 'agent'
   text: string
   time: string
+  createdAt: string
 }
 
 export type Appointment = {
   id: string
+  patientId: string
   day: number
   time: string
   specialty: string
@@ -96,9 +106,21 @@ export type ProgramMetrics = {
 
 export type PromotionHistoryItem = {
   id: string
+  patientId: string
+  benefitId?: string
   date: string
   promotion: string
   channel: 'E-mail' | 'Mensagem'
+}
+
+export type AuditEvent = {
+  id: string
+  entity: AuditEntity
+  entityId: string
+  action: AuditAction
+  createdAt: string
+  actor: string
+  metadata?: Record<string, string | number | boolean | null>
 }
 
 export type DemoState = {
@@ -111,6 +133,7 @@ export type DemoState = {
   campaigns: Campaign[]
   benefits: Benefit[]
   programMetrics: ProgramMetrics
+  auditEvents: AuditEvent[]
 }
 
 export const patients: Patient[] = [
@@ -128,6 +151,7 @@ export const patients: Patient[] = [
     temperature: 'Quente',
     channel: 'WhatsApp',
     interest: 'Ressonância Magnética',
+    consent: { marketing: true, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
   {
     id: 'p-carlos',
@@ -143,6 +167,7 @@ export const patients: Patient[] = [
     temperature: 'Quente',
     channel: 'Site',
     interest: 'Consulta Cardiologia',
+    consent: { marketing: true, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
   {
     id: 'p-mariana',
@@ -158,6 +183,7 @@ export const patients: Patient[] = [
     temperature: 'Morno',
     channel: 'WhatsApp',
     interest: 'Exame de Sangue',
+    consent: { marketing: false, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
   {
     id: 'p-roberto',
@@ -173,6 +199,7 @@ export const patients: Patient[] = [
     temperature: 'Morno',
     channel: 'Telefone',
     interest: 'Retorno Clínico',
+    consent: { marketing: false, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
   {
     id: 'p-fernanda',
@@ -188,6 +215,7 @@ export const patients: Patient[] = [
     temperature: 'Frio',
     channel: 'WhatsApp',
     interest: 'Informações sobre planos',
+    consent: { marketing: true, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
   {
     id: 'p-paulo',
@@ -203,6 +231,7 @@ export const patients: Patient[] = [
     temperature: 'Frio',
     channel: 'Site',
     interest: 'Valores de consulta',
+    consent: { marketing: false, communication: true, updatedAt: '2026-05-14T09:00:00.000Z' },
   },
 ]
 
@@ -284,6 +313,7 @@ export const conversations: Conversation[] = [
 export const appointments: Appointment[] = [
   {
     id: 'a-1',
+    patientId: 'p-roberto',
     day: 2,
     time: '16:00',
     specialty: 'Clínico Geral',
@@ -295,6 +325,7 @@ export const appointments: Appointment[] = [
   },
   {
     id: 'a-2',
+    patientId: 'p-ana',
     day: 3,
     time: '09:00',
     specialty: 'Cardiologia',
@@ -306,6 +337,7 @@ export const appointments: Appointment[] = [
   },
   {
     id: 'a-3',
+    patientId: 'p-mariana',
     day: 3,
     time: '14:30',
     specialty: 'Dermatologia',
@@ -317,6 +349,7 @@ export const appointments: Appointment[] = [
   },
   {
     id: 'a-4',
+    patientId: 'p-carlos',
     day: 4,
     time: '10:00',
     specialty: 'Ortopedia',
@@ -328,6 +361,7 @@ export const appointments: Appointment[] = [
   },
   {
     id: 'a-5',
+    patientId: 'p-fernanda',
     day: 5,
     time: '11:00',
     specialty: 'Pediatria',
@@ -429,4 +463,5 @@ export const defaultDemoState: DemoState = {
     retention: 38,
     redemptions: 1245,
   },
+  auditEvents: [],
 }
